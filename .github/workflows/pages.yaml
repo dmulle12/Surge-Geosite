@@ -1,0 +1,100 @@
+name: Build & Deploy Pages
+
+# Pure-static alternative to the Cloudflare pipeline: rebuilds the rule
+# JSONs from upstream .dat files, pre-renders Surge RULE-SET text files,
+# and publishes them to GitHub Pages. No Cloudflare token needed.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 1 * * *'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Fetch geosite.dat and compute SHA
+        id: geosite
+        run: |
+          set -eux
+          URL="https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat"
+          curl -fsSL -o /tmp/geosite.dat "$URL"
+          SHA=$(sha256sum /tmp/geosite.dat | cut -d ' ' -f1)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch geoip.dat and compute SHA
+        id: geoip
+        run: |
+          set -eux
+          URL="https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geoip.dat"
+          curl -fsSL -o /tmp/geoip.dat "$URL"
+          SHA=$(sha256sum /tmp/geoip.dat | cut -d ' ' -f1)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cache (geosite JSON)
+        id: cache-json
+        uses: actions/cache@v5
+        with:
+          path: dist/geosite-json
+          key: geosite-json-${{ steps.geosite.outputs.sha }}
+
+      - name: Restore cache (geoip JSON)
+        id: cache-geoip
+        uses: actions/cache@v5
+        with:
+          path: dist/geoip-json
+          key: geoip-json-${{ steps.geoip.outputs.sha }}
+
+      - name: Build geosite JSON from Loyalsoldier geosite.dat
+        if: steps.cache-json.outputs.cache-hit != 'true'
+        env:
+          GEO_DAT_PATH: /tmp/geosite.dat
+        run: npm run build:geosite
+
+      - name: Build geoip JSON from Loyalsoldier geoip.dat
+        if: steps.cache-geoip.outputs.cache-hit != 'true'
+        env:
+          GEOIP_DAT_PATH: /tmp/geoip.dat
+        run: npm run build:geoip
+
+      - name: Pre-render static Surge rule files
+        run: npm run build:surge-static
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: pages/
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

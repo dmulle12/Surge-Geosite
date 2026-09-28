@@ -1,0 +1,25 @@
+name = "surge-geosite"
+compatibility_date = "2024-09-02"
+main = "worker/index.ts"
+
+# --- Cloudflare resources for YOUR account (created during setup) ---
+# wrangler kv namespace create GEO_KV
+# wrangler r2 bucket create surge-srs
+# wrangler d1 create surge-geosite
+# Then paste the returned IDs below.
+
+[[kv_namespaces]]
+binding = "GEO_KV"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+
+[[r2_buckets]]
+binding = "SRS_BUCKET"
+bucket_name = "surge-srs"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "surge-geosite"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+[observability.logs]
+enabled = true
