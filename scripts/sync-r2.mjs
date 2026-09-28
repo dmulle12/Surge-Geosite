@@ -1,0 +1,442 @@
+// Incremental R2 upload using a manifest to minimize Class A ops
+// - Scans local build outputs and computes sha256 per object
+// - Downloads a single manifest from R2 (Class B GET)
+// - Uploads ONLY changed/new objects (Class A PUT per changed key)
+// - Updates the manifest
+//
+// Included paths → bucket keys:
+//   dist/geosite-json/*.json  → geosite-json/<file>
+//   dist/srs/*.srs            → geosite/<file>
+//   index.json (repo root)    → geosite/index.json
+//
+// Usage:
+//   R2_BUCKET=<bucket_name> node scripts/sync-r2.mjs
+//   # Optional env:
+//   #   R2_CONCURRENCY=6  DRY_RUN=1  MANIFEST_KEY=manifests/geosite.json
+//
+// Transport: AWS CLI (S3-compatible)
+//   Required env: R2_ACCESS_KEY_ID & R2_SECRET_ACCESS_KEY (or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY)
+//                 plus either R2_S3_ENDPOINT or CLOUDFLARE_ACCOUNT_ID/R2_ACCOUNT_ID to derive endpoint
+//   Endpoint example: https://<account_id>.r2.cloudflarestorage.com; region: "auto"
+
+import fs from "node:fs";
+import fsp from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
+import crypto from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileP = promisify(execFile);
+
+const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+const DIST_DIR = path.join(REPO_ROOT, "dist");
+const SRC_JSON_DIR = path.join(DIST_DIR, "geosite-json");
+const SRC_GEOIP_JSON_DIR = path.join(DIST_DIR, "geoip-json");
+const SRS_DIR = path.join(DIST_DIR, "srs");
+const SRS_GEOIP_DIR = path.join(DIST_DIR, "srs-geoip");
+const MRS_DIR = path.join(DIST_DIR, "mrs");
+const MRS_GEOIP_DIR = path.join(DIST_DIR, "mrs-geoip");
+const ROOT_INDEX_JSON = path.join(REPO_ROOT, "index.json");
+const ROOT_GEOIP_INDEX_JSON = path.join(REPO_ROOT, "geoip-index.json");
+
+const DEFAULT_MANIFEST_KEY = process.env.MANIFEST_KEY || "manifests/geosite.json";
+const CONCURRENCY = Math.max(1, Number(process.env.R2_CONCURRENCY || 6));
+const DRY_RUN = process.env.DRY_RUN === "1" || process.env.DRY_RUN === "true";
+
+// Resolve bucket name: env R2_BUCKET wins; else parse wrangler.toml heuristically
+const getBucketName = async () => {
+  if (process.env.R2_BUCKET && process.env.R2_BUCKET.trim().length > 0) {
+    return process.env.R2_BUCKET.trim();
+  }
+  const tomlPath = path.join(REPO_ROOT, "wrangler.toml");
+  const txt = await fsp.readFile(tomlPath, "utf8");
+  // naive parse: first [[r2_buckets]] bucket_name = "..."
+  const m = txt.match(/\[\[r2_buckets\]\][\s\S]*?bucket_name\s*=\s*"([^"]+)"/);
+  if (m && m[1]) return m[1];
+  throw new Error("R2 bucket name not found. Set env R2_BUCKET or wrangler.toml [[r2_buckets]].bucket_name");
+};
+
+const walk = async (dir, filterFn) => {
+  const res = [];
+  try {
+    const entries = await fsp.readdir(dir, { withFileTypes: true });
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        res.push(...(await walk(full, filterFn)));
+      } else if (!filterFn || filterFn(full)) {
+        res.push(full);
+      }
+    }
+  } catch (_) {
+    // ignore missing dirs
+  }
+  return res;
+};
+
+const sha256File = async (file) => {
+  const h = crypto.createHash("sha256");
+  await new Promise((resolve, reject) => {
+    const s = fs.createReadStream(file);
+    s.on("error", reject);
+    s.on("data", (chunk) => h.update(chunk));
+    s.on("end", resolve);
+  });
+  return h.digest("hex");
+};
+
+const contentTypeFor = (file) => {
+  if (file.endsWith(".json")) return "application/json";
+  if (file.endsWith(".srs")) return "application/octet-stream";
+  if (file.endsWith(".mrs")) return "application/octet-stream";
+  return "application/octet-stream";
+};
+
+const buildLocalPlan = async () => {
+  const plan = [];
+  // dist/geosite-json → geosite-json/
+  const jsonFiles = await walk(SRC_JSON_DIR, (f) => f.endsWith(".json"));
+  for (const f of jsonFiles) {
+    const key = `geosite-json/${path.basename(f)}`;
+    plan.push({ file: f, key, size: (await fsp.stat(f)).size });
+  }
+  // dist/geoip-json → geoip-json/
+  const geoipJsonFiles = await walk(SRC_GEOIP_JSON_DIR, (f) => f.endsWith(".json"));
+  for (const f of geoipJsonFiles) {
+    const key = `geoip-json/${path.basename(f)}`;
+    plan.push({ file: f, key, size: (await fsp.stat(f)).size });
+  }
+  // dist/srs → geosite/
+  const srsFiles = await walk(SRS_DIR, (f) => f.endsWith(".srs"));
+  for (const f of srsFiles) {
+    const key = `geosite/${path.basename(f)}`;
+    plan.push({ file: f, key, size: (await fsp.stat(f)).size });
+  }
+  // dist/srs-geoip → geoip/
+  const srsGeoipFiles = await walk(SRS_GEOIP_DIR, (f) => f.endsWith(".srs"));
+  for (const f of srsGeoipFiles) {
+    const key = `geoip/${path.basename(f)}`;
+    plan.push({ file: f, key, size: (await fsp.stat(f)).size });
+  }
+  // dist/mrs → geosite/
+  const mrsFiles = await walk(MRS_DIR, (f) => f.endsWith(".mrs"));
+  for (const f of mrsFiles) {
+    const key = `geosite/${path.basename(f)}`;
+    plan.push({ file: f, key, size: (await fsp.stat(f)).size });
+  }
+  // dist/mrs-geoip → geoip/
+  const mrsGeoipFiles = await walk(MRS_GEOIP_DIR, (f) => f.endsWith(".mrs"));
+  for (const f of mrsGeoipFiles) {
+    const key = `geoip/${path.basename(f)}`;
+    plan.push({ file: f, key, size: (await fsp.stat(f)).size });
+  }
+  // repo index.json → geosite/index.json
+  try {
+    const st = await fsp.stat(ROOT_INDEX_JSON);
+    if (st.isFile()) {
+      plan.push({ file: ROOT_INDEX_JSON, key: "geosite/index.json", size: st.size });
+    }
+  } catch (_) {}
+  // repo geoip-index.json → geoip/index.json
+  try {
+    const st = await fsp.stat(ROOT_GEOIP_INDEX_JSON);
+    if (st.isFile()) {
+      plan.push({ file: ROOT_GEOIP_INDEX_JSON, key: "geoip/index.json", size: st.size });
+    }
+  } catch (_) {}
+  // compute sha256
+  for (const p of plan) {
+    p.sha256 = await sha256File(p.file);
+    p.contentType = contentTypeFor(p.file);
+  }
+  return plan;
+};
+
+// ---------- Tool resolution ----------
+const resolveAwsCmd = () => {
+  const bin = process.platform === "win32" ? "aws.exe" : "aws";
+  // Prefer system AWS CLI; node_modules usually doesn't ship it
+  return bin;
+};
+
+const awsCli = async (args, extraEnv = {}) => {
+  const cmd = resolveAwsCmd();
+  const { stdout, stderr } = await execFileP(cmd, args, {
+    cwd: REPO_ROOT,
+    env: { ...process.env, ...extraEnv },
+  });
+  return { stdout, stderr };
+};
+
+const getAwsConfig = () => {
+  const accessKey = process.env.R2_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID;
+  const secretKey = process.env.R2_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY;
+  const accountId = process.env.R2_ACCOUNT_ID || process.env.CLOUDFLARE_ACCOUNT_ID;
+  const endpoint = process.env.R2_S3_ENDPOINT || (accountId ? `https://${accountId}.r2.cloudflarestorage.com` : undefined);
+  const region = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "auto";
+  return { accessKey, secretKey, endpoint, region };
+};
+
+const requireAwsConfig = () => {
+  const { accessKey, secretKey, endpoint, region } = getAwsConfig();
+  if (!accessKey || !secretKey || !endpoint) {
+    throw new Error(
+      "Missing AWS/R2 S3 config. Set R2_ACCESS_KEY_ID & R2_SECRET_ACCESS_KEY (or AWS_*), and R2_S3_ENDPOINT or R2_ACCOUNT_ID/CLOUDFLARE_ACCOUNT_ID."
+    );
+  }
+  return { accessKey, secretKey, endpoint, region };
+};
+
+// ---------- Remote I/O ----------
+const fetchRemoteManifest = async (bucket, key) => {
+  const tmp = path.join(os.tmpdir(), `r2-manifest-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);
+  try {
+    const { accessKey, secretKey, endpoint, region } = requireAwsConfig();
+    // get-object: positional outfile must be last
+    await awsCli([
+      "s3api",
+      "get-object",
+      "--bucket",
+      bucket,
+      "--key",
+      key,
+      "--endpoint-url",
+      endpoint,
+      "--region",
+      region,
+      tmp,
+    ], {
+      AWS_ACCESS_KEY_ID: accessKey,
+      AWS_SECRET_ACCESS_KEY: secretKey,
+      AWS_S3_FORCE_PATH_STYLE: "true",
+    });
+    const txt = await fsp.readFile(tmp, "utf8");
+    await fsp.unlink(tmp).catch(() => {});
+    return JSON.parse(txt);
+  } catch (e) {
+    // Treat missing or invalid manifest as empty
+    await fsp.unlink(tmp).catch(() => {});
+    return { version: 1, generatedAt: 0, entries: {} };
+  }
+};
+
+const putObject = async (bucket, key, file, contentType) => {
+  const { accessKey, secretKey, endpoint, region } = requireAwsConfig();
+  await awsCli([
+    "s3api",
+    "put-object",
+    "--bucket",
+    bucket,
+    "--key",
+    key,
+    "--body",
+    file,
+    "--content-type",
+    contentType,
+    "--endpoint-url",
+    endpoint,
+    "--region",
+    region,
+  ], {
+    AWS_ACCESS_KEY_ID: accessKey,
+    AWS_SECRET_ACCESS_KEY: secretKey,
+    AWS_S3_FORCE_PATH_STYLE: "true",
+  });
+};
+
+const summarizeChangedKeys = (keys) => {
+  const geosite = new Set();
+  const geoip = new Set();
+
+  for (const key of keys) {
+    if (key.startsWith("geosite-json/")) {
+      const name = path.basename(key, ".json");
+      if (name) geosite.add(name);
+      continue;
+    }
+    if (key.startsWith("geosite/")) {
+      // Only .srs and .mrs files correspond to per-list segments. Ignore others like index.json.
+      if (!key.endsWith(".srs") && !key.endsWith(".mrs")) continue;
+      let name = key.endsWith(".srs") ? path.basename(key, ".srs") : path.basename(key, ".mrs");
+      if (!name) continue;
+      const atIndex = name.indexOf("@");
+      if (atIndex >= 0) {
+        name = name.slice(0, atIndex);
+      }
+      if (name) geosite.add(name);
+      continue;
+    }
+    if (key.startsWith("geoip-json/")) {
+      const name = path.basename(key, ".json");
+      if (name) geoip.add(name);
+      continue;
+    }
+    if (key.startsWith("geoip/")) {
+      if (!key.endsWith(".srs") && !key.endsWith(".mrs")) continue;
+      let name = key.endsWith(".srs") ? path.basename(key, ".srs") : path.basename(key, ".mrs");
+      if (!name) continue;
+      // D1 segments for geoip are built per base list (no @v4/@v6 variants).
+      // Normalize by stripping any @suffix to match dist/d1/segments/geoip/<name>.sql
+      const atIndex = name.indexOf("@");
+      if (atIndex >= 0) {
+        name = name.slice(0, atIndex);
+      }
+      if (name) geoip.add(name);
+    }
+  }
+
+  return {
+    geosite: Array.from(geosite).sort((a, b) => a.localeCompare(b, "en", { sensitivity: "base" })),
+    geoip: Array.from(geoip).sort((a, b) => a.localeCompare(b, "en", { sensitivity: "base" })),
+  };
+};
+
+const uploadPlan = async (bucket, manifestKey, localPlan, remoteManifest) => {
+  const remoteEntries = remoteManifest?.entries || {};
+  const changed = [];
+  for (const item of localPlan) {
+    const remote = remoteEntries[item.key];
+    if (!remote || remote.sha256 !== item.sha256 || remote.size !== item.size) {
+      changed.push(item);
+    }
+  }
+  if (changed.length === 0) {
+    console.log("All objects up-to-date. No uploads needed.");
+    return { entries: remoteEntries, changedKeys: [] };
+  }
+  console.log(`Uploading ${changed.length} changed object(s) with concurrency=${CONCURRENCY} ...`);
+
+  let idx = 0;
+  const workers = Array.from({ length: CONCURRENCY }, async () => {
+    while (idx < changed.length) {
+      const i = idx++;
+      const it = changed[i];
+      if (!it) break;
+      if (DRY_RUN) {
+        console.log(`[DRY] PUT ${it.key} ← ${path.relative(REPO_ROOT, it.file)} (${it.size} bytes)`);
+        continue;
+      }
+      try {
+        await putObject(bucket, it.key, it.file, it.contentType);
+        console.log(`PUT ${it.key} (${it.size} bytes)`);
+      } catch (e) {
+        console.error(`Failed PUT ${it.key}:`, e?.stderr || e?.message || e);
+        throw e;
+      }
+    }
+  });
+  await Promise.all(workers);
+
+  // Merge manifest entries
+  // Only keep current local keys to avoid persisting removed keys in the manifest
+  const merged = {};
+  for (const it of localPlan) {
+    merged[it.key] = { sha256: it.sha256, size: it.size };
+  }
+  // Write new manifest locally, then upload it
+  const manifest = { version: 1, generatedAt: Date.now(), entries: merged };
+  const tmp = path.join(os.tmpdir(), `r2-manifest-out-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);
+  await fsp.writeFile(tmp, JSON.stringify(manifest));
+  if (DRY_RUN) {
+    console.log(`[DRY] PUT ${manifestKey} (manifest)`);
+  } else {
+    await putObject(bucket, manifestKey, tmp, "application/json");
+    console.log(`PUT ${manifestKey} (manifest)`);
+  }
+  await fsp.unlink(tmp).catch(() => {});
+  return { entries: merged, changedKeys: changed.map((item) => item.key) };
+};
+
+const main = async () => {
+  const bucket = await getBucketName();
+  const manifestKey = DEFAULT_MANIFEST_KEY;
+
+  console.log(`Bucket: ${bucket}`);
+  console.log(`Manifest key: ${manifestKey}`);
+  console.log("Transport: AWS CLI (S3-compatible)");
+  if (DRY_RUN) console.log("DRY RUN enabled; no writes will occur.");
+
+  const plan = await buildLocalPlan();
+  if (plan.length === 0) {
+    console.log("No local artifacts found to sync.");
+    const summaryPath = path.join(DIST_DIR, "d1-changed.json");
+    await fsp.mkdir(DIST_DIR, { recursive: true });
+    await fsp.writeFile(summaryPath, JSON.stringify({ geosite: [], geoip: [] }, null, 2) + "\n", "utf8");
+    return;
+  }
+  // Deterministic order for stable logs
+  plan.sort((a, b) => a.key.localeCompare(b.key));
+
+  const remoteManifest = await fetchRemoteManifest(bucket, manifestKey);
+  const { changedKeys, entries: newEntries } = await uploadPlan(bucket, manifestKey, plan, remoteManifest);
+
+  const summary = summarizeChangedKeys(changedKeys);
+  // Compute deletions: keys present in remote manifest before upload but not in current local plan
+  const remoteKeysBefore = new Set(Object.keys(remoteManifest?.entries || {}));
+  const localKeysNow = new Set(plan.map((p) => p.key));
+  const deletedKeys = Array.from(remoteKeysBefore).filter((k) => !localKeysNow.has(k));
+
+  const collectDeleted = (keys) => {
+    const geosite = new Set();
+    const geoip = new Set();
+    for (const key of keys) {
+      if (key.startsWith("geosite-json/")) {
+        const name = path.basename(key, ".json");
+        if (name) geosite.add(name);
+        continue;
+      }
+      if (key.startsWith("geosite/")) {
+        if (!key.endsWith(".srs")) continue;
+        let name = path.basename(key, ".srs");
+        if (!name) continue;
+        const atIndex = name.indexOf("@");
+        if (atIndex >= 0) name = name.slice(0, atIndex);
+        if (name) geosite.add(name);
+        continue;
+      }
+      if (key.startsWith("geoip-json/")) {
+        const name = path.basename(key, ".json");
+        if (name) geoip.add(name);
+        continue;
+      }
+      if (key.startsWith("geoip/")) {
+        if (!key.endsWith(".srs")) continue;
+        let name = path.basename(key, ".srs");
+        if (!name) continue;
+        const atIndex = name.indexOf("@");
+        if (atIndex >= 0) name = name.slice(0, atIndex);
+        if (name) geoip.add(name);
+      }
+    }
+    return {
+      geosite: Array.from(geosite).sort((a, b) => a.localeCompare(b, "en", { sensitivity: "base" })),
+      geoip: Array.from(geoip).sort((a, b) => a.localeCompare(b, "en", { sensitivity: "base" })),
+    };
+  };
+
+  const deleted = collectDeleted(deletedKeys);
+  const summaryPath = path.join(DIST_DIR, "d1-changed.json");
+  await fsp.mkdir(DIST_DIR, { recursive: true });
+  const out = {
+    geosite: summary.geosite,
+    geoip: summary.geoip,
+    deletedGeosite: deleted.geosite,
+    deletedGeoip: deleted.geoip,
+  };
+  await fsp.writeFile(summaryPath, JSON.stringify(out, null, 2) + "\n", "utf8");
+  const totalChanges = summary.geosite.length + summary.geoip.length;
+  const totalDeletes = deleted.geosite.length + deleted.geoip.length;
+  if (totalChanges === 0 && totalDeletes === 0) {
+    console.log("No geosite/geoip categories changed or deleted for D1 sync.");
+  } else {
+    console.log(
+      `Recorded D1 incremental changes: +${summary.geosite.length} geosite, +${summary.geoip.length} geoip; deletions: -${deleted.geosite.length} geosite, -${deleted.geoip.length} geoip (see ${summaryPath}).`
+    );
+  }
+};
+
+main().catch((err) => {
+  console.error("R2 manifest sync failed:", err);
+  process.exit(1);
+});

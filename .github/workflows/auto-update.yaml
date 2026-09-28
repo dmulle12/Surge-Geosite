@@ -1,0 +1,281 @@
+name: Auto Update (Cloudflare)
+
+# NOTE: the daily schedule and push triggers are disabled. The Cloudflare
+# pipeline (R2/KV/D1/Workers) is superseded by the pure-static GitHub Pages
+# pipeline in pages.yaml. Keep workflow_dispatch for manual runs only.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-geosite-json:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout the repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Fetch geosite.dat and compute SHA
+        id: geosite
+        run: |
+          set -eux
+          URL="https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat"
+          curl -fsSL -o /tmp/geosite.dat "$URL"
+          SHA=$(sha256sum /tmp/geosite.dat | cut -d ' ' -f1)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch geoip.dat and compute SHA
+        id: geoip
+        run: |
+          set -eux
+          URL="https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geoip.dat"
+          curl -fsSL -o /tmp/geoip.dat "$URL"
+          SHA=$(sha256sum /tmp/geoip.dat | cut -d ' ' -f1)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cache (geosite JSON)
+        id: cache-json
+        uses: actions/cache@v5
+        with:
+          path: |
+            dist/geosite-json
+            index.json
+            data_files.md
+          key: geosite-json-${{ steps.geosite.outputs.sha }}
+
+      - name: Restore cache (geoip JSON)
+        id: cache-geoip
+        uses: actions/cache@v5
+        with:
+          path: |
+            dist/geoip-json
+            geoip-index.json
+            geoip_files.md
+          key: geoip-json-${{ steps.geoip.outputs.sha }}
+
+      - name: Build geosite JSON from Loyalsoldier geosite.dat
+        if: steps.cache-json.outputs.cache-hit != 'true'
+        env:
+          GEO_DAT_PATH: /tmp/geosite.dat
+        run: npm run build:geosite
+
+      - name: Build geoip JSON from Loyalsoldier geoip.dat
+        if: steps.cache-geoip.outputs.cache-hit != 'true'
+        env:
+          GEOIP_DAT_PATH: /tmp/geoip.dat
+        run: npm run build:geoip
+
+      - name: Build D1 seed SQL
+        if: steps.cache-json.outputs.cache-hit != 'true' || steps.cache-geoip.outputs.cache-hit != 'true'
+        run: npm run build:d1
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.24.x'
+          cache: false
+
+      - name: Install sing-box CLI
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          VERSION=$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r '.tag_name')
+          if [ -z "${VERSION}" ] || [ "${VERSION}" = "null" ]; then
+            echo "Failed to resolve sing-box latest version" >&2
+            exit 1
+          fi
+          VERSION=${VERSION#v}
+          ARCHIVE="sing-box-${VERSION}-linux-amd64.tar.gz"
+          URL="https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/${ARCHIVE}"
+          DOWNLOAD="${RUNNER_TEMP}/${ARCHIVE}"
+          curl -fsSL -o "$DOWNLOAD" "$URL"
+          tar -xzf "$DOWNLOAD" -C "$RUNNER_TEMP"
+          BIN_DIR="${HOME}/.local/bin"
+          mkdir -p "$BIN_DIR"
+          install -m 0755 "${RUNNER_TEMP}/sing-box-${VERSION}-linux-amd64/sing-box" "$BIN_DIR/sing-box"
+          echo "$BIN_DIR" >> "$GITHUB_PATH"
+          sing-box version
+
+      - name: Install mihomo CLI
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          VERSION=$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | jq -r '.tag_name')
+          if [ -z "${VERSION}" ] || [ "${VERSION}" = "null" ]; then
+            echo "Failed to resolve mihomo latest version" >&2
+            exit 1
+          fi
+          VERSION=${VERSION#v}
+          ARCHIVE="mihomo-linux-amd64-v${VERSION}.gz"
+          URL="https://github.com/MetaCubeX/mihomo/releases/download/v${VERSION}/${ARCHIVE}"
+          DOWNLOAD="${RUNNER_TEMP}/${ARCHIVE}"
+          curl -fsSL -o "$DOWNLOAD" "$URL"
+          gunzip "$DOWNLOAD"
+          BIN_DIR="${HOME}/.local/bin"
+          mkdir -p "$BIN_DIR"
+          install -m 0755 "${RUNNER_TEMP}/mihomo-linux-amd64-v${VERSION}" "$BIN_DIR/mihomo"
+          echo "$BIN_DIR" >> "$GITHUB_PATH"
+          mihomo -v
+
+      - name: Restore cache (SRS)
+        id: cache-srs
+        uses: actions/cache@v5
+        with:
+          path: dist/srs
+          key: srs-${{ steps.geosite.outputs.sha }}-${{ vars.SRS_FILTERS }}
+
+      - name: Restore cache (SRS GeoIP)
+        id: cache-srs-geoip
+        uses: actions/cache@v5
+        with:
+          path: dist/srs-geoip
+          key: srs-geoip-${{ steps.geoip.outputs.sha }}
+
+      - name: Restore cache (MRS)
+        id: cache-mrs
+        uses: actions/cache@v5
+        with:
+          path: dist/mrs
+          key: mrs-${{ steps.geosite.outputs.sha }}-${{ vars.MRS_FILTERS }}
+
+      - name: Restore cache (MRS GeoIP)
+        id: cache-mrs-geoip
+        uses: actions/cache@v5
+        with:
+          path: dist/mrs-geoip
+          key: mrs-geoip-${{ steps.geoip.outputs.sha }}
+
+      - name: Build SRS rulesets
+        if: steps.cache-srs.outputs.cache-hit != 'true'
+        env:
+          SRS_FILTERS: ${{ vars.SRS_FILTERS }}
+          SRS_CONCURRENCY: ${{ vars.SRS_CONCURRENCY }}
+        run: npm run build:srs
+
+      - name: Build SRS GeoIP rulesets
+        if: steps.cache-srs-geoip.outputs.cache-hit != 'true'
+        env:
+          SRS_CONCURRENCY: ${{ vars.SRS_CONCURRENCY }}
+        run: npm run build:srs-geoip
+
+      - name: Build MRS rulesets
+        if: steps.cache-mrs.outputs.cache-hit != 'true'
+        env:
+          MRS_FILTERS: ${{ vars.MRS_FILTERS }}
+          MRS_CONCURRENCY: ${{ vars.MRS_CONCURRENCY }}
+        run: npm run build:mrs
+
+      - name: Build MRS GeoIP rulesets
+        if: steps.cache-mrs-geoip.outputs.cache-hit != 'true'
+        env:
+          MRS_CONCURRENCY: ${{ vars.MRS_CONCURRENCY }}
+        run: npm run build:mrs-geoip
+
+      - name: Install AWS CLI v2
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y unzip
+          curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "/tmp/awscliv2.zip"
+          unzip -q /tmp/awscliv2.zip -d /tmp
+          sudo /tmp/aws/install --update
+          aws --version
+
+      - name: Manifest incremental sync to R2
+        if: steps.cache-json.outputs.cache-hit != 'true' || steps.cache-srs.outputs.cache-hit != 'true' || steps.cache-geoip.outputs.cache-hit != 'true' || steps.cache-srs-geoip.outputs.cache-hit != 'true' || steps.cache-mrs.outputs.cache-hit != 'true' || steps.cache-mrs-geoip.outputs.cache-hit != 'true'
+        env:
+          # AWS CLI (S3) credentials for R2
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          # Provide either R2_S3_ENDPOINT or (recommended) account id to derive endpoint
+          R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # R2_S3_ENDPOINT: ${{ vars.R2_S3_ENDPOINT }}
+          R2_BUCKET: ${{ vars.SRS_BUCKET_NAME }}
+          R2_CONCURRENCY: ${{ vars.SRS_CONCURRENCY }}
+        run: |
+          set -eux
+          if [ -z "${R2_BUCKET:-}" ]; then
+            echo "R2_BUCKET (vars.SRS_BUCKET_NAME) not set; skip upload" >&2
+            exit 0
+          fi
+          npm run r2:sync
+
+      - name: Sync D1 database with latest seed
+        if: steps.cache-json.outputs.cache-hit != 'true' || steps.cache-geoip.outputs.cache-hit != 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          D1_DATABASE_NAME: ${{ vars.D1_DATABASE_NAME }}
+          D1_DATABASE_ID: ${{ vars.D1_DATABASE_ID }}
+        run: |
+          set -eux
+          if [ -z "${D1_DATABASE_NAME:-}" ] && [ -z "${D1_DATABASE_ID:-}" ]; then
+            echo "D1_DATABASE_NAME or D1_DATABASE_ID repo var not set; skip D1 sync" >&2
+            exit 0
+          fi
+          if [ ! -f dist/d1/seed.sql ]; then
+            echo "dist/d1/seed.sql is missing; run npm run build:d1 first" >&2
+            exit 1
+          fi
+          if [ ! -d dist/d1/segments ]; then
+            echo "dist/d1/segments directory is missing; run npm run build:d1 first" >&2
+            exit 1
+          fi
+          node scripts/import-d1-rest.mjs
+
+      - name: Write index.json to Workers KV (single-key)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          Optional if using --namespace-id: account id may not be required
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          GEO_KV_NAMESPACE_ID: ${{ secrets.GEO_KV_NAMESPACE_ID || secrets.GEOSITE_KV_NAMESPACE_ID || secrets.GEOIP_KV_NAMESPACE_ID }}
+        run: |
+          set -eux
+          if [ -z "${GEO_KV_NAMESPACE_ID:-}" ]; then
+            echo "No GEO_KV namespace secret set (GEO_KV_NAMESPACE_ID / GEOSITE_KV_NAMESPACE_ID / GEOIP_KV_NAMESPACE_ID); skip KV write" >&2
+            exit 0
+          fi
+          npx wrangler kv key put geosite:index --namespace-id="$GEO_KV_NAMESPACE_ID" --path ./index.json --remote
+
+      - name: Write geoip-index.json to Workers KV (single-key)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          GEO_KV_NAMESPACE_ID: ${{ secrets.GEO_KV_NAMESPACE_ID || secrets.GEOSITE_KV_NAMESPACE_ID || secrets.GEOIP_KV_NAMESPACE_ID }}
+        run: |
+          set -eux
+          if [ -z "${GEO_KV_NAMESPACE_ID:-}" ]; then
+            echo "No GEO_KV namespace secret set (GEO_KV_NAMESPACE_ID / GEOSITE_KV_NAMESPACE_ID / GEOIP_KV_NAMESPACE_ID); skip KV write" >&2
+            exit 0
+          fi
+          npx wrangler kv key put geoip:index --namespace-id="$GEO_KV_NAMESPACE_ID" --path ./geoip-index.json --remote
+
+      - name: Configure Git
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+
+      - name: Commit and push if necessary
+        run: |
+          set -e
+          git add README.md data_files.md geoip_files.md
+          if ! git diff --staged --quiet; then
+            git commit -m "[auto] Sync with upstream (geosite.dat → JSON)"
+            git push
+          else
+            echo "No changes to commit"
+          fi

@@ -1,0 +1,8 @@
+# Cloudflare Pages redirects
+# Redirect API calls to the Worker
+/api/* https://surge-geosite.jkoch14.workers.dev/api/:splat 200
+/geosite/* https://surge-geosite.jkoch14.workers.dev/geosite/:splat 200
+/geoip/* https://surge-geosite.jkoch14.workers.dev/geoip/:splat 200
+
+# SPA fallback
+/* /index.html 200

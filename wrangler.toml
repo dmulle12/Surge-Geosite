@@ -1,0 +1,30 @@
+name = "surge-geosite"
+compatibility_date = "2024-09-02"
+main = "worker/index.ts"
+
+# --- Cloudflare resources for YOUR account (created during setup) ---
+# wrangler kv namespace create GEO_KV
+# wrangler r2 bucket create surge-srs
+# wrangler d1 create surge-geosite
+# Then paste the returned IDs below.
+
+[[kv_namespaces]]
+binding = "GEO_KV"
+id = "78d6625bf5d24bc9a4c6143583242ebb"
+
+[[r2_buckets]]
+binding = "SRS_BUCKET"
+bucket_name = "surge-srs"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "surge-geosite"
+database_id = "5fdf0760-6212-4d61-b68b-98d6a2b78906"
+
+[observability.logs]
+enabled = true
+
+# Custom domain route for the API (zone: dmuller.tech)
+routes = [
+  { pattern = "api-surge-geosite.dmuller.tech/*", zone_id = "2ee7f77f1daff9b16dadc56a2ba30156" },
+]
