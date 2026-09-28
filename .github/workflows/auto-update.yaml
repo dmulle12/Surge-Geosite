@@ -47,7 +47,7 @@ jobs:
 
       - name: Restore cache (geosite JSON)
         id: cache-json
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             dist/geosite-json
@@ -57,7 +57,7 @@ jobs:
 
       - name: Restore cache (geoip JSON)
         id: cache-geoip
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             dist/geoip-json
@@ -133,28 +133,28 @@ jobs:
 
       - name: Restore cache (SRS)
         id: cache-srs
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: dist/srs
           key: srs-${{ steps.geosite.outputs.sha }}-${{ vars.SRS_FILTERS }}
 
       - name: Restore cache (SRS GeoIP)
         id: cache-srs-geoip
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: dist/srs-geoip
           key: srs-geoip-${{ steps.geoip.outputs.sha }}
 
       - name: Restore cache (MRS)
         id: cache-mrs
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: dist/mrs
           key: mrs-${{ steps.geosite.outputs.sha }}-${{ vars.MRS_FILTERS }}
 
       - name: Restore cache (MRS GeoIP)
         id: cache-mrs-geoip
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: dist/mrs-geoip
           key: mrs-geoip-${{ steps.geoip.outputs.sha }}

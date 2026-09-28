@@ -56,14 +56,14 @@ jobs:
 
       - name: Restore cache (geosite JSON)
         id: cache-json
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: dist/geosite-json
           key: geosite-json-${{ steps.geosite.outputs.sha }}
 
       - name: Restore cache (geoip JSON)
         id: cache-geoip
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: dist/geoip-json
           key: geoip-json-${{ steps.geoip.outputs.sha }}
