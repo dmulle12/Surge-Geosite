@@ -1,4 +1,4 @@
-# Surge Geosite Enhance
+# Surge Geosite
 
 <p align="center">
   <img src="./docs/img/logo.png" width="128" alt="Surge Geosite Enhance logo" />
