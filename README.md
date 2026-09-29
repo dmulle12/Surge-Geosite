@@ -4,6 +4,8 @@
   <img src="./docs/img/logo.png" width="128" alt="Surge Geosite Enhance logo" />
 </p>
 
+> 声明：本仓库源自 [Sleepstars/Surge-Geosite-Enhance](https://github.com/Sleepstars/Surge-Geosite-Enhance)（上游原项目：[xxxbrian/Surge-Geosite](https://github.com/xxxbrian/Surge-Geosite)），是站长搭建自用的非官方实例，与原作者无关。仓库 Logo 为原创设计。
+
 A Cloudflare Workers-based service that converts Loyalsoldier's geosite/geoip datasets into Surge-compatible plain-text rulesets on demand, while also serving JSON indexes and SRS bundle files. It ships with a frontend browser (Cloudflare Pages) for quick browsing, previewing, and searching.
 
 👉 Deployment guide (including CI and Cloudflare setup): [docs/deploy.md](docs/deploy.md)
