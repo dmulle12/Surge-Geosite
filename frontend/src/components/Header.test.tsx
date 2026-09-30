@@ -13,7 +13,7 @@ describe('Header', () => {
   it('renders navigation links', () => {
     render(<Header />)
 
-    expect(screen.getByText('博客文章')).toBeInTheDocument()
     expect(screen.getByText('GitHub')).toBeInTheDocument()
+    expect(screen.queryByText('博客文章')).not.toBeInTheDocument()
   })
 })
