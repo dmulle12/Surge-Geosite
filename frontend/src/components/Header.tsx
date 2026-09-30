@@ -1,5 +1,5 @@
 import React from "react"
-import { BookOpen, Github } from "lucide-react"
+import { Github } from "lucide-react"
 import logo from "../../../docs/img/logo.png"
 import { Button } from "./ui/Button"
 import { ThemeToggle } from "./ThemeToggle"
@@ -28,21 +28,7 @@ export const Header: React.FC = () => {
           <nav className="flex items-center gap-3">
             <ThemeToggle />
             <a
-              href="https://blog.sleepstars.net/geosite-enhance"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <Button
-                variant="ghost"
-                size="sm"
-                className="flex items-center gap-2"
-              >
-                <BookOpen className="h-4 w-4" />
-                博客文章
-              </Button>
-            </a>
-            <a
-              href="https://github.com/Sleepstars/Surge-Geosite-Enhance"
+              href="https://github.com/dmulle12/Surge-Geosite"
               target="_blank"
               rel="noopener noreferrer"
             >
