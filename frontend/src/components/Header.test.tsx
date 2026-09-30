@@ -6,7 +6,7 @@ describe('Header', () => {
     render(<Header />)
 
     expect(screen.getByText('Surge Geosite Explorer')).toBeInTheDocument()
-    expect(screen.getByAltText('Surge Geosite Enhance logo')).toBeInTheDocument()
+    expect(screen.getByAltText('Surge Geosite logo')).toBeInTheDocument()
     expect(screen.getByText('直观浏览与域名搜索 GeoSite / GeoIP 规则')).toBeInTheDocument()
   })
 
