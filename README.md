@@ -1,7 +1,7 @@
 # Surge Geosite
 
 <p align="center">
-  <img src="./docs/img/logo.png" width="128" alt="Surge Geosite Enhance logo" />
+  <img src="./docs/img/logo.png" width="128" alt="Surge Geosite logo" />
 </p>
 
 > 声明：本仓库源自 [Sleepstars/Surge-Geosite-Enhance](https://github.com/Sleepstars/Surge-Geosite-Enhance)（上游原项目：[xxxbrian/Surge-Geosite](https://github.com/xxxbrian/Surge-Geosite)），是站长搭建自用的非官方实例，与原作者无关。仓库 Logo 为原创设计。
