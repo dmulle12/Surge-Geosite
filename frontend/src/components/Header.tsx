@@ -12,7 +12,7 @@ export const Header: React.FC = () => {
           <div className="flex items-center gap-4">
             <img
               src={logo}
-              alt="Surge Geosite Enhance logo"
+              alt="Surge Geosite logo"
               className="h-10 w-10 rounded-md border border-border/40 bg-background object-contain p-1"
             />
             <div className="flex flex-col gap-1">
